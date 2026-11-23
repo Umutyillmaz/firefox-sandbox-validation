@@ -1,0 +1,94 @@
+# Validate Firefox's own sandbox (seccomp + namespaces) on native x86_64 Linux.
+# Public repository: standard GitHub-hosted runner only (free for public repositories).
+#
+# Manual only. Read-only token. No secrets. Only GitHub-owned actions, pinned by commit SHA.
+# The browser only ever reaches example.com and Mozilla Remote Settings (egress
+# allowlist in docker/egress/allowlist.txt). It runs no CAPTCHA, anti-bot or
+# third-party-site testing.
+#
+# Outcome: FAIL / PASS-PARTIAL / PASS-FULL from tests/acceptance.py, enforced by
+# scripts/ci_summary.py. A browser that launches is never a pass by itself.
+name: native-sandbox-validation
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-sandbox-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Firefox sandbox on native x86_64 (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EVIDENCE_DIR: logs/run/evidence
+      ARTIFACT_DIR: logs/artifact
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Preflight - native x86_64, Docker, seccomp
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "kernel: $(uname -srm)"
+          test "$(uname -m)" = x86_64 || { echo "::error::not x86_64"; exit 2; }
+          if grep -qiE 'rosetta|qemu' /proc/self/maps; then echo "::error::binary translator present"; exit 2; fi
+          virt="$(systemd-detect-virt || true)"; echo "virtualization: ${virt:-unknown}"
+          test "${virt:-unknown}" != qemu || { echo "::error::QEMU/TCG emulation"; exit 2; }
+          grep -m1 'model name' /proc/cpuinfo
+          docker version --format 'docker server {{.Server.Version}} ({{.Server.Arch}})'
+          docker compose version
+          test "$(docker info --format '{{.Architecture}}')" = x86_64 || { echo "::error::Docker not x86_64"; exit 2; }
+          secopts="$(docker info --format '{{json .SecurityOptions}}')"; echo "docker security options: $secopts"
+          echo "$secopts" | grep -q 'name=seccomp' || { echo "::error::Docker seccomp inactive"; exit 2; }
+          if echo "$secopts" | grep -q unconfined; then echo "::error::Docker seccomp unconfined"; exit 2; fi
+          grep -E '^Seccomp:' /proc/self/status
+          df -h . | tail -1
+
+      - name: Native sandbox validation (scripts/run_validation.sh)
+        id: validate
+        shell: bash
+        run: |
+          set +e
+          mkdir -p logs/run
+          bash scripts/run_validation.sh > logs/run/run.log 2>&1
+          rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # Job log shows the structure and the acceptance table; the full run log stays on the ephemeral runner.
+          grep -E '^(=== |\[(PASS|FAIL|info)\]|VERDICT|PREFLIGHT FAIL|BUILD FAIL|upstream DNS detected|[0-9]+/[0-9]+ checks passed)' logs/run/run.log || true
+          if [ ! -f "$EVIDENCE_DIR/acceptance.json" ]; then
+            echo "--- no verdict; last 40 lines of the run log (redacted: job logs are public) ---"
+            tail -n 40 logs/run/run.log | sed -E 's#/home/[^/ ]+/#/home/<user>/#g; s#\b(10|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9.]+\b#<private-ip>#g; s#gh[pousr]_[A-Za-z0-9]{20,}#<token>#g' 
+          fi
+          exit 0
+
+      - name: Sanitize evidence (allowlist + redaction + leak scan)
+        id: sanitize
+        if: always()
+        shell: bash
+        run: python3 scripts/sanitize_evidence.py "$EVIDENCE_DIR" "$ARTIFACT_DIR"
+
+      - name: Upload sanitized evidence
+        if: always() && steps.sanitize.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-sandbox-evidence
+          path: logs/artifact/
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: false
+
+      - name: Verdict (FAIL / PASS-PARTIAL / PASS-FULL)
+        if: always()
+        shell: bash
+        env:
+          VALIDATION_RC: ${{ steps.validate.outputs.rc }}
+        run: python3 scripts/ci_summary.py --evidence "$EVIDENCE_DIR" --rc "${VALIDATION_RC:-missing}" --enforce

@@ -1,0 +1,18 @@
+# Approved egress destinations for the browser container (one DNS name per line).
+#
+# A name also approves its subdomains (dnsmasq suffix matching).
+# Only TCP/443 to the IPv4 addresses these names resolve to is reachable.
+# Every other name gets NXDOMAIN, and every other IP, port and protocol is rejected.
+#
+# Changing this file requires rebuilding the egress image. That is deliberate,
+# so the policy can't change at runtime.
+
+# Smoke-test target. Also the positive control for validation.
+example.com
+
+# Mozilla Remote Settings: certificate security state (OneCRL revocations,
+# CRLite filters, preloaded intermediates).
+firefox.settings.services.mozilla.com
+firefox-settings-attachments.cdn.mozilla.net
+# Signing-certificate chain Firefox uses to verify Remote Settings signatures.
+content-signature-2.cdn.mozilla.net

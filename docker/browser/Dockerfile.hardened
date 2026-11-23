@@ -1,0 +1,33 @@
+# Hardened runtime layer on top of the base image (same packages, same sealed Firefox build).
+FROM ffsbx-base:local
+
+# - Non-root runtime user with no shell and no home on the image.
+# - /root becomes traverse-only (711) so the sealed engine under
+#   /root/.cache/invisible-playwright is readable but stays root-owned. The
+#   runtime user cannot modify it. Only the /root directory entry changes, so
+#   the 767 MB engine layer is not copied.
+# - A read-only seed of the warm security state (OneCRL, CRLite, intermediates)
+#   fetched at build time. The entrypoint copies it into tmpfs, so the library
+#   does not regenerate or fetch it at launch.
+RUN set -eux; \
+    useradd --uid 10001 --user-group --no-create-home --home-dir /tmp/home --shell /usr/sbin/nologin pw; \
+    chmod 0711 /root; \
+    mkdir -p /opt/ffsbx/seed; \
+    cp -a /root/.cache/invisible-playwright/security-state /opt/ffsbx/seed/; \
+    chown -R root:root /opt/ffsbx; \
+    chmod -R a+rX,go-w /opt/ffsbx
+
+COPY entrypoint.sh /usr/local/bin/browser-entrypoint
+RUN chmod 0555 /usr/local/bin/browser-entrypoint
+
+# Split the library's two roots: sealed engine (read-only) vs. machine state (tmpfs).
+ENV INVISIBLE_PLAYWRIGHT_ENGINE_DIR=/root/.cache/invisible-playwright \
+    INVISIBLE_PLAYWRIGHT_CACHE_DIR=/tmp/engine-state \
+    HOME=/tmp/home \
+    XDG_CACHE_HOME=/tmp/home/.cache \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER 10001:10001
+WORKDIR /app
+ENTRYPOINT ["/usr/local/bin/browser-entrypoint"]
+CMD ["python", "-I", "tests/smoke_example_com.py"]

@@ -1,0 +1,12 @@
+# Run output (raw evidence, run logs, sanitized artifact): never committed
+logs/
+# Python / editor / OS
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+# Anything secret-shaped
+.env
+.env.*
+*.pem
+*.key
